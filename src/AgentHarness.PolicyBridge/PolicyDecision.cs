@@ -25,14 +25,22 @@ public sealed record ToolScope
     public static readonly ToolScope None = new(false, false, false);
     public static readonly ToolScope ReadOnly = new(true, false, false);
 
-    public ToolScope(bool read, bool write, bool exec)
+    public ToolScope(bool read, bool write, bool exec, IReadOnlyList<string>? allowedWritePaths = null)
     {
         CanRead = read; CanWrite = write; CanExec = exec;
+        AllowedWritePaths = allowedWritePaths ?? Array.Empty<string>();
     }
 
     public bool CanRead { get; }
     public bool CanWrite { get; }
     public bool CanExec { get; }
+
+    /// <summary>
+    /// Roots a Write effect's target path must resolve inside (see
+    /// AgentHarness.Tools.Enforcement.PathContainment). Empty means the effect flag alone
+    /// governs — no path-level containment is checked.
+    /// </summary>
+    public IReadOnlyList<string> AllowedWritePaths { get; }
 
     public bool Permits(ToolEffect effect) => effect switch
     {
