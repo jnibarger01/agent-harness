@@ -1,0 +1,15 @@
+# .NET / IDE
+bin/
+obj/
+*.user
+*.suo
+.vs/
+
+# SQLite (local dev artifacts; not source)
+*.db
+*.db-shm
+*.db-wal
+
+# OS
+.DS_Store
+Thumbs.db
