@@ -37,13 +37,16 @@ public sealed class InboxProcessorService : BackgroundService
             await using var scope = _scopeFactory.CreateAsyncScope();
             var inbox = scope.ServiceProvider.GetRequiredService<SqliteHarnessStore>();
 
-            await foreach (var turn in inbox.PendingAsync(stoppingToken))
+            await foreach (var turn in inbox.PendingTurnsAsync(stoppingToken))
             {
                 // Durable authority: dispatch creates a Run + Attempt in the store BEFORE any
                 // worker is spawned. If the host crashes here, the Run remains and is reclaimed.
                 var run = new Run { Id = Guid.NewGuid(), TurnId = turn.Id, CreatedAt = DateTimeOffset.UtcNow };
                 run.Dispatch();
-                await inbox.SaveRunAsync(run, stoppingToken);
+                turn.MarkRunning();
+                // Persisting the Run and Turn transition together closes the replay loop: a crash
+                // cannot leave one durable record ahead of the other.
+                await inbox.PersistDispatchAsync(turn, run, stoppingToken);
 
                 // (Phase 2+) lease + spawn worker via ExecutionSupervisor.
             }

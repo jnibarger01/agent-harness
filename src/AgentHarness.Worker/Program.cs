@@ -46,11 +46,11 @@ public sealed class WorkerLoop
         await Task.Delay(50, ct); // placeholder for real loop
 
         // 4. Report observations; do NOT declare Succeeded.
-        Console.WriteLine(JsonSerializer.Serialize(new WorkerEvent(attemptId, 0, WorkerEventType.Completed, JsonDocument.Parse("{}").RootElement, DateTimeOffset.UtcNow)));
+        Console.WriteLine(JsonSerializer.Serialize(new WorkerEvent(attemptId, 0, WorkerEventType.Completed.ToString(), JsonDocument.Parse("{}").RootElement, DateTimeOffset.UtcNow)));
     }
 
     private static void EmitHeartbeat(Guid attemptId) =>
-        Console.WriteLine(JsonSerializer.Serialize(new WorkerEvent(attemptId, 0, WorkerEventType.Heartbeat, JsonDocument.Parse("{}").RootElement, DateTimeOffset.UtcNow)));
+        Console.WriteLine(JsonSerializer.Serialize(new WorkerEvent(attemptId, 0, WorkerEventType.Heartbeat.ToString(), JsonDocument.Parse("{}").RootElement, DateTimeOffset.UtcNow)));
 }
 
 /// <summary>Versioned harness protocol command. ACP is an adapter, not this core shape.</summary>
@@ -59,3 +59,5 @@ public sealed record StartAttemptCommand(
     string Model, IReadOnlyList<string> GrantedCapabilities, DateTimeOffset Deadline);
 
 public sealed record WorkerEvent(Guid AttemptId, long Sequence, string Type, JsonElement Payload, DateTimeOffset OccurredAt);
+
+public enum WorkerEventType { Heartbeat, Completed }

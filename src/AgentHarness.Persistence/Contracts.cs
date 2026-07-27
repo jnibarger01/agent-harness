@@ -7,15 +7,16 @@ public interface IInbox
 {
     /// <summary>Idempotent accept. Returns existing Turn if inboundKey already seen.</summary>
     Task<Turn> AcceptAsync(string channel, string inboundKey, string payload, CancellationToken ct);
+    Task SaveTurnAsync(Turn turn, CancellationToken ct);
     Task<Turn?> GetAsync(Guid turnId, CancellationToken ct);
-    IAsyncEnumerable<Turn> PendingAsync(CancellationToken ct);
+    IAsyncEnumerable<Turn> PendingTurnsAsync(CancellationToken ct);
 }
 
 /// <summary>Durable outbox for deliveries. Triggered by Run state transition.</summary>
 public interface IOutbox
 {
     Task<Delivery> EnqueueAsync(Guid runId, string channel, string outboundKey, string payload, CancellationToken ct);
-    IAsyncEnumerable<Delivery> PendingAsync(CancellationToken ct);
+    IAsyncEnumerable<Delivery> PendingDeliveriesAsync(CancellationToken ct);
     Task MarkSentAsync(Guid deliveryId, CancellationToken ct);
 }
 
@@ -23,6 +24,7 @@ public interface IOutbox
 public interface IHarnessStore
 {
     Task SaveRunAsync(Run run, CancellationToken ct);
+    Task PersistDispatchAsync(Turn turn, Run run, CancellationToken ct);
     Task<Run?> GetRunAsync(Guid runId, CancellationToken ct);
     Task SaveAttemptAsync(Attempt attempt, CancellationToken ct);
     Task<Attempt?> GetAttemptAsync(Guid attemptId, CancellationToken ct);

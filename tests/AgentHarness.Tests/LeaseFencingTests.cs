@@ -79,6 +79,46 @@ public class LeaseFencingTests
     }
 
     [Fact]
+    public async Task Renew_AfterExpiry_FailsEvenBeforeReclaim()
+    {
+        using var store = new SqliteHarnessStore(TempDb());
+
+        var lease = await store.TryAcquireLeaseAsync("lane-lapsed", LeaseKind.Attempt, TimeSpan.FromMilliseconds(1), CancellationToken.None);
+        Assert.NotNull(lease);
+        await Task.Delay(20);
+
+        var lapsedRenew = await store.TryRenewLeaseAsync("lane-lapsed", lease!.OwnerToken, TimeSpan.FromMinutes(5), CancellationToken.None);
+
+        Assert.Null(lapsedRenew);
+    }
+
+    [Fact]
+    public async Task Renew_AfterAttemptTerminalState_Fails()
+    {
+        using var store = new SqliteHarnessStore(TempDb());
+        var attemptId = Guid.NewGuid();
+        var attempt = new Attempt
+        {
+            Id = attemptId,
+            WorkItemId = Guid.NewGuid(),
+            RunId = Guid.NewGuid(),
+            AgentId = "test",
+            CreatedAt = DateTimeOffset.UtcNow,
+        };
+        attempt.Lease("pending", DateTimeOffset.UtcNow.AddMinutes(5));
+        attempt.Start("worker");
+        attempt.Complete();
+        await store.SaveAttemptAsync(attempt, CancellationToken.None);
+
+        var lease = await store.TryAcquireLeaseAsync(attemptId.ToString(), LeaseKind.Attempt, TimeSpan.FromMinutes(5), CancellationToken.None);
+        Assert.NotNull(lease);
+
+        var renewal = await store.TryRenewLeaseAsync(attemptId.ToString(), lease!.OwnerToken, TimeSpan.FromMinutes(5), CancellationToken.None);
+
+        Assert.Null(renewal);
+    }
+
+    [Fact]
     public async Task Release_WithSupersededToken_Fails()
     {
         using var store = new SqliteHarnessStore(TempDb());

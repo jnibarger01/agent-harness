@@ -1,5 +1,6 @@
 using AgentHarness.PolicyBridge;
 using AgentHarness.Tools.Enforcement;
+using System.Security.Cryptography;
 using Xunit;
 
 namespace AgentHarness.ToolsTests;
@@ -11,8 +12,8 @@ public class GrantEnforcerTests
     private static PolicyDecision Decision(
         Verdict verdict = Verdict.Allow,
         ToolScope? scope = null,
-        DateTimeOffset? expiresAt = null,
-        bool degraded = false) => new()
+        DateTimeOffset? expiresAt = null
+        ) => new()
     {
         DecisionId = Guid.NewGuid(),
         Verdict = verdict,
@@ -20,7 +21,6 @@ public class GrantEnforcerTests
         ExpiresAt = expiresAt ?? Now.AddMinutes(5),
         InputsHash = "hash",
         Authority = "acs",
-        Degraded = degraded,
     };
 
     [Fact]
@@ -59,21 +59,6 @@ public class GrantEnforcerTests
     }
 
     [Fact]
-    public void DegradedDecision_CannotAuthorizeWrite()
-    {
-        var scope = new ToolScope(read: true, write: true, exec: false);
-        var result = GrantEnforcer.Check(Decision(scope: scope, degraded: true), ToolEffect.Write, Now);
-        Assert.False(result.Allowed);
-    }
-
-    [Fact]
-    public void DegradedDecision_StillAllowsRead()
-    {
-        var result = GrantEnforcer.Check(Decision(scope: ToolScope.ReadOnly, degraded: true), ToolEffect.Read, Now);
-        Assert.True(result.Allowed);
-    }
-
-    [Fact]
     public void MatchingDecision_IsAllowed()
     {
         var result = GrantEnforcer.Check(Decision(), ToolEffect.Read, Now);
@@ -104,5 +89,78 @@ public class GrantEnforcerTests
     public void PathContainment_RejectsPrefixAndTraversalTricks(string root, string candidate, bool expected)
     {
         Assert.Equal(expected, PathContainment.IsContained(root, candidate));
+    }
+
+    [Fact]
+    public void SignedGrant_IsAcceptedWhenAllBindingsMatch()
+    {
+        using var authority = ECDsa.Create(ECCurve.NamedCurves.nistP256);
+        var grant = SignedGrant(authority, Guid.NewGuid(), "41", "args-1");
+
+        var result = GrantEnforcer.CheckSigned(
+            grant, grant.AttemptId, "41", "args-1", Now, authority);
+
+        Assert.True(result.Allowed);
+    }
+
+    [Fact]
+    public void SignedGrant_CannotReplayAcrossAttempts()
+    {
+        using var authority = ECDsa.Create(ECCurve.NamedCurves.nistP256);
+        var originalAttempt = Guid.NewGuid();
+        var grant = SignedGrant(authority, originalAttempt, "41", "args-1");
+
+        var result = GrantEnforcer.CheckSigned(
+            grant, Guid.NewGuid(), "41", "args-1", Now, authority);
+
+        Assert.False(result.Allowed);
+    }
+
+    [Fact]
+    public void SignedGrant_RejectsForgedBindings()
+    {
+        using var authority = ECDsa.Create(ECCurve.NamedCurves.nistP256);
+        var grant = SignedGrant(authority, Guid.NewGuid(), "41", "args-1");
+        var forged = grant with { FencingToken = "42" };
+
+        var result = GrantEnforcer.CheckSigned(
+            forged, forged.AttemptId, "42", "args-1", Now, authority);
+
+        Assert.False(result.Allowed);
+    }
+
+    [Fact]
+    public void SignedGrant_RejectsChangedExpiryOrArguments()
+    {
+        using var authority = ECDsa.Create(ECCurve.NamedCurves.nistP256);
+        var grant = SignedGrant(authority, Guid.NewGuid(), "41", "args-1");
+
+        var changedExpiry = grant with { ExpiresAt = Now.AddHours(1) };
+        var expiryResult = GrantEnforcer.CheckSigned(
+            changedExpiry, changedExpiry.AttemptId, "41", "args-1", Now, authority);
+
+        var changedArguments = grant with { ArgumentsHash = "args-2" };
+        var argumentsResult = GrantEnforcer.CheckSigned(
+            changedArguments, changedArguments.AttemptId, "41", "args-2", Now, authority);
+
+        Assert.False(expiryResult.Allowed);
+        Assert.False(argumentsResult.Allowed);
+    }
+
+    private static SignedGrant SignedGrant(ECDsa authority, Guid attemptId, string fencingToken, string argumentsHash)
+    {
+        var grant = new SignedGrant
+        {
+            DecisionId = Guid.NewGuid(),
+            AttemptId = attemptId,
+            FencingToken = fencingToken,
+            ExpiresAt = Now.AddMinutes(5),
+            ArgumentsHash = argumentsHash,
+            ToolId = "test.read",
+            Effect = ToolEffect.Read,
+            NarrowedScope = ToolScope.ReadOnly,
+            Authority = "acs",
+        };
+        return grant with { Signature = GrantSignature.Sign(grant, authority) };
     }
 }

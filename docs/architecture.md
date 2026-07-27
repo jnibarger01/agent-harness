@@ -49,13 +49,12 @@ public sealed record PolicyDecision {
     public ToolScope NarrowedScope { get; init; }    // harness enforces; never re-derives
     public DateTimeOffset ExpiresAt { get; init; }
     public string InputsHash { get; init; }
-    public string Authority { get; init; }           // "acs" | "openclaw" | "degraded-local"
-    public bool Degraded { get; init; }
+    public string Authority { get; init; }           // "acs" | "openclaw"
 }
 ```
 
-- Degraded mode (ACS down): `Deny` everything except ACS's own `read`-class tools (mapped to
-  ACS's `commandClass: "read"` vocabulary). Every degraded decision is journaled `Degraded=true`.
+- Authority outage: return no new grant. If read continuity is ever required, use a pre-issued
+  ACS-signed standing grant; never mint authority locally during an outage.
 - Every `ToolCall` carries `DecisionId`. `ITurnJournal.ReplayViolationsAsync` joins
   `ToolCall → PolicyDecision` and flags any call with no `DecisionId` or args outside
   `NarrowedScope`. "Policy-consuming" is thereby *proven*, not asserted.
@@ -112,6 +111,17 @@ behind them. `AgentHarness.Isolation`, the `IHarnessStore` lease methods, and
   out it no longer owns anything.
 - **Enforcement at the call site (principles #5-#7).** Journaled replay could previously only
   *detect* a policy violation after the fact. `GrantEnforcer.Check` is the point a worker loop
-  calls before invoking a tool: deny-by-default, checks verdict/expiry/narrowed-scope/degraded
-  flag, and (via `PathContainment`) the write-scope containment the "Seam test" section already
+  calls before invoking a tool: deny-by-default, checks verdict/expiry/narrowed scope, and (via
+  `PathContainment`) the write-scope containment the "Seam test" section already
   promised but had no code enforcing.
+
+### Phase 2 safety contracts
+
+`SignedGrant` is the worker-facing authority artifact. Its ECDSA payload binds the grant to the
+`attemptId`, current fencing token, expiry, `argumentsHash`, tool, effect, narrowed scope, and
+authority. `GrantEnforcer.CheckSigned` rejects a valid signature presented for another attempt,
+lease, expiry, or argument set. The harness never creates an outage-time substitute grant.
+
+`ToolExecutionJournalGate` makes the journal write part of execution admission. A failed append
+returns a denial; callers must stop before invoking the side effect. Lease renewal also checks
+the attempt row, so `Completed` and `LeaseExpired` attempts cannot keep renewing their lane.

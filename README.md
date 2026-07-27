@@ -24,8 +24,9 @@ rationale. `AgentHarness.Policy` does **not** exist by design.
 5. **Policy is an artifact, not a boolean.** `PolicyBridge` returns `PolicyDecision
    { decisionId, verdict, narrowedScope, expiresAt, inputsHash }`. The harness *enforces*
    `narrowedScope`; it never re-derives it (re-deriving = fail-open).
-6. **Degraded mode fails closed.** ACS unreachable → `Deny` everything except ACS's own
-   `read`-class tools. Every degraded decision is journaled (`Degraded=true`) for audit.
+6. **Authority outages fail closed.** If ACS is unreachable, the bridge returns no new grant.
+   Any future read continuity must use a pre-issued ACS-signed standing grant, never an
+   outage-time local grant.
 7. **Every `ToolCall` carries `DecisionId`.** `ITurnJournal.ReplayViolationsAsync` proves the
    runtime never acted outside granted authority. "Policy-consuming" is verified, not asserted.
 8. **`appsettings` tools = capability manifest, not authorization.** Authorization is always

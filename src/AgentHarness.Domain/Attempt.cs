@@ -15,7 +15,14 @@ public sealed record Attempt
     public Guid Id { get; init; }
 
     /// <summary>ACS work-item id. Required. The harness did not mint this.</summary>
-    public Guid WorkItemId { get; init; }
+    private Guid _workItemId;
+    public Guid WorkItemId
+    {
+        get => _workItemId;
+        init => _workItemId = value == Guid.Empty
+            ? throw new ArgumentException("WorkItemId must be supplied by ACS", nameof(WorkItemId))
+            : value;
+    }
 
     public Guid RunId { get; init; }
     public string AgentId { get; init; } = "";

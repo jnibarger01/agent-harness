@@ -1,4 +1,5 @@
 using AgentHarness.PolicyBridge;
+using System.Security.Cryptography;
 
 namespace AgentHarness.Tools.Enforcement;
 
@@ -8,8 +9,7 @@ namespace AgentHarness.Tools.Enforcement;
 /// omission.
 ///
 /// This closes a real gap in the scaffold: principles #5-#7 in README.md say the harness
-/// "enforces NarrowedScope; it never re-derives it" and that degraded mode "denies everything
-/// except read-class tools", but until now nothing in the codebase actually checked a
+/// "enforces NarrowedScope; it never re-derives it", but until now nothing in the codebase actually checked a
 /// ToolCall against a PolicyDecision before letting it through — only
 /// <c>ITurnJournal.ReplayViolationsAsync</c> could prove a violation, after the fact. This is
 /// the enforcement point a worker loop should call before invoking a tool. It answers "does
@@ -36,12 +36,6 @@ public static class GrantEnforcer
         if (!decision.NarrowedScope.Permits(requestedEffect))
             return GrantCheck.Deny($"effect {requestedEffect} exceeds narrowed scope");
 
-        // Belt and braces: a degraded-mode decision never authorizes a side effect, regardless
-        // of what NarrowedScope claims. The bridge should not have issued one, and the
-        // enforcer refuses to honour it if it did (README principle #6: "Degraded mode fails closed").
-        if (decision.Degraded && requestedEffect != ToolEffect.Read)
-            return GrantCheck.Deny("degraded-mode decision cannot authorize a non-read effect");
-
         if (requestedEffect == ToolEffect.Write && decision.NarrowedScope.AllowedWritePaths.Count > 0)
         {
             if (writeTargetPath is null ||
@@ -52,6 +46,41 @@ public static class GrantEnforcer
         }
 
         return GrantCheck.Allow();
+    }
+
+    public static GrantCheck CheckSigned(
+        SignedGrant? grant,
+        Guid attemptId,
+        string fencingToken,
+        string argumentsHash,
+        DateTimeOffset now,
+        ECDsa authorityKey,
+        string? writeTargetPath = null)
+    {
+        if (grant is null)
+            return GrantCheck.Deny("no signed grant presented (deny by default)");
+
+        if (grant.AttemptId != attemptId)
+            return GrantCheck.Deny("grant is bound to a different attempt");
+
+        if (!string.Equals(grant.FencingToken, fencingToken, StringComparison.Ordinal))
+            return GrantCheck.Deny("grant fencing token does not match the current lease");
+
+        if (!string.Equals(grant.ArgumentsHash, argumentsHash, StringComparison.Ordinal))
+            return GrantCheck.Deny("grant arguments hash does not match the requested call");
+
+        if (!GrantSignature.Verify(grant, authorityKey))
+            return GrantCheck.Deny("grant signature is invalid");
+
+        return Check(new PolicyDecision
+        {
+            DecisionId = grant.DecisionId,
+            Verdict = Verdict.Allow,
+            NarrowedScope = grant.NarrowedScope,
+            ExpiresAt = grant.ExpiresAt,
+            InputsHash = grant.ArgumentsHash,
+            Authority = grant.Authority,
+        }, grant.Effect, now, writeTargetPath);
     }
 }
 

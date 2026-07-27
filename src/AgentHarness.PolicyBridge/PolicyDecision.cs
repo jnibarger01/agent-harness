@@ -12,9 +12,8 @@ public sealed record PolicyDecision
     public DateTimeOffset ExpiresAt { get; init; }
     /// <summary>Hash of (agentId, toolId, args-shape, capabilities) at decision time. Replay checks this.</summary>
     public string InputsHash { get; init; } = "";
-    /// <summary>"acs" | "openclaw" | "degraded-local". Degraded means ACS was unreachable.</summary>
+    /// <summary>"acs" or "openclaw". Outage-time local grants are not a valid authority.</summary>
     public string Authority { get; init; } = "";
-    public bool Degraded { get; init; }
 }
 
 public enum Verdict { Allow, Deny, RequireApproval }

@@ -9,6 +9,6 @@
     <ProjectReference Include="..\AgentHarness.Domain\AgentHarness.Domain.csproj" />
   </ItemGroup>
   <ItemGroup>
-    <PackageReference Include="Microsoft.Data.Sqlite" Version="9.0.0" />
+    <PackageReference Include="Microsoft.Data.Sqlite" />
   </ItemGroup>
 </Project>

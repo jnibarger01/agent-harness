@@ -26,7 +26,7 @@ public sealed class SqliteTurnJournal : ITurnJournal, IDisposable
                 DecisionId TEXT, Data TEXT, At TEXT);
             CREATE TABLE IF NOT EXISTS Decisions (
                 DecisionId TEXT PRIMARY KEY, Verdict TEXT, NarrowedScope TEXT,
-                ExpiresAt TEXT, InputsHash TEXT, Authority TEXT, Degraded INTEGER);
+                ExpiresAt TEXT, InputsHash TEXT, Authority TEXT);
             """;
         cmd.ExecuteNonQuery();
     }
@@ -46,14 +46,13 @@ public sealed class SqliteTurnJournal : ITurnJournal, IDisposable
     public Task RecordDecisionAsync(PolicyDecision d, CancellationToken ct)
     {
         using var cmd = _conn.CreateCommand();
-        cmd.CommandText = "INSERT OR REPLACE INTO Decisions(DecisionId,Verdict,NarrowedScope,ExpiresAt,InputsHash,Authority,Degraded) VALUES($id,$v,$s,$e,$h,$a,$d)";
+        cmd.CommandText = "INSERT OR REPLACE INTO Decisions(DecisionId,Verdict,NarrowedScope,ExpiresAt,InputsHash,Authority) VALUES($id,$v,$s,$e,$h,$a)";
         cmd.Parameters.AddWithValue("$id", d.DecisionId.ToString());
         cmd.Parameters.AddWithValue("$v", d.Verdict.ToString());
         cmd.Parameters.AddWithValue("$s", $"{(d.NarrowedScope.CanRead?"R":"")}{(d.NarrowedScope.CanWrite?"W":"")}{(d.NarrowedScope.CanExec?"X":"")}");
         cmd.Parameters.AddWithValue("$e", d.ExpiresAt.ToString("O"));
         cmd.Parameters.AddWithValue("$h", d.InputsHash);
         cmd.Parameters.AddWithValue("$a", d.Authority);
-        cmd.Parameters.AddWithValue("$d", d.Degraded ? 1 : 0);
         return cmd.ExecuteNonQueryAsync(ct);
     }
 
@@ -77,16 +76,20 @@ public sealed class SqliteTurnJournal : ITurnJournal, IDisposable
         using var cmd = _conn.CreateCommand();
         cmd.CommandText = "INSERT INTO Journal(Kind,TurnId,ToolCallId,AttemptId,ToolId,DecisionId,Data,At) VALUES($k,$t,$tc,$a,$ti,$d,$data,$at)";
         cmd.Parameters.AddWithValue("$k", kind);
-        cmd.Parameters.AddWithValue("$t", turnId?.ToString());
-        cmd.Parameters.AddWithValue("$tc", toolCallId?.ToString());
-        cmd.Parameters.AddWithValue("$a", attemptId?.ToString());
-        cmd.Parameters.AddWithValue("$ti", toolId);
-        cmd.Parameters.AddWithValue("$d", decisionId?.ToString());
+        AddNullable(cmd, "$t", turnId?.ToString());
+        AddNullable(cmd, "$tc", toolCallId?.ToString());
+        AddNullable(cmd, "$a", attemptId?.ToString());
+        AddNullable(cmd, "$ti", toolId);
+        AddNullable(cmd, "$d", decisionId?.ToString());
         cmd.Parameters.AddWithValue("$data", data);
         cmd.Parameters.AddWithValue("$at", DateTimeOffset.UtcNow.ToString("O"));
         await cmd.ExecuteNonQueryAsync(ct);
     }
 
     private static string Json(string s) => JsonSerializer.Serialize(s);
+
+    private static void AddNullable(SqliteCommand command, string name, object? value) =>
+        command.Parameters.AddWithValue(name, value ?? DBNull.Value);
+
     public void Dispose() => _conn.Dispose();
 }

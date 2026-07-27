@@ -70,6 +70,8 @@ public sealed class SqliteHarnessStore : IInbox, IOutbox, IHarnessStore, IDispos
         return turn;
     }
 
+    public Task SaveTurnAsync(Turn turn, CancellationToken ct) => UpsertTurnAsync(turn, ct);
+
     public async Task<Turn?> GetAsync(Guid turnId, CancellationToken ct)
     {
         using var cmd = _conn.CreateCommand();
@@ -79,7 +81,7 @@ public sealed class SqliteHarnessStore : IInbox, IOutbox, IHarnessStore, IDispos
         return r.Read() ? ReadTurn(r) : null;
     }
 
-    public async IAsyncEnumerable<Turn> PendingAsync([System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken ct)
+    public async IAsyncEnumerable<Turn> PendingTurnsAsync([System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken ct)
     {
         using var cmd = _conn.CreateCommand();
         cmd.CommandText = "SELECT Id,Channel,InboundKey,Payload,State,CreatedAt,RejectReason FROM Turns WHERE State='Accepted'";
@@ -97,6 +99,38 @@ public sealed class SqliteHarnessStore : IInbox, IOutbox, IHarnessStore, IDispos
         cmd.Parameters.AddWithValue("$s", run.State.ToString());
         cmd.Parameters.AddWithValue("$c", run.CreatedAt.ToString("O"));
         await cmd.ExecuteNonQueryAsync(ct);
+    }
+
+    public async Task PersistDispatchAsync(Turn turn, Run run, CancellationToken ct)
+    {
+        using var tx = _conn.BeginTransaction();
+
+        using (var runCommand = _conn.CreateCommand())
+        {
+            runCommand.Transaction = tx;
+            runCommand.CommandText = "INSERT OR REPLACE INTO Runs(Id,TurnId,State,CreatedAt) VALUES($id,$t,$s,$c)";
+            runCommand.Parameters.AddWithValue("$id", run.Id.ToString());
+            runCommand.Parameters.AddWithValue("$t", run.TurnId.ToString());
+            runCommand.Parameters.AddWithValue("$s", run.State.ToString());
+            runCommand.Parameters.AddWithValue("$c", run.CreatedAt.ToString("O"));
+            await runCommand.ExecuteNonQueryAsync(ct);
+        }
+
+        using (var turnCommand = _conn.CreateCommand())
+        {
+            turnCommand.Transaction = tx;
+            turnCommand.CommandText = "INSERT OR REPLACE INTO Turns(Id,Channel,InboundKey,Payload,State,CreatedAt,RejectReason) VALUES($id,$c,$k,$p,$s,$a,$rr)";
+            turnCommand.Parameters.AddWithValue("$id", turn.Id.ToString());
+            turnCommand.Parameters.AddWithValue("$c", turn.Channel);
+            turnCommand.Parameters.AddWithValue("$k", turn.InboundKey);
+            turnCommand.Parameters.AddWithValue("$p", turn.Payload);
+            turnCommand.Parameters.AddWithValue("$s", turn.State.ToString());
+            turnCommand.Parameters.AddWithValue("$a", turn.CreatedAt.ToString("O"));
+            AddNullable(turnCommand, "$rr", turn.RejectReason);
+            await turnCommand.ExecuteNonQueryAsync(ct);
+        }
+
+        tx.Commit();
     }
 
     public async Task<Run?> GetRunAsync(Guid runId, CancellationToken ct)
@@ -119,9 +153,9 @@ public sealed class SqliteHarnessStore : IInbox, IOutbox, IHarnessStore, IDispos
         cmd.Parameters.AddWithValue("$a", attempt.AgentId);
         cmd.Parameters.AddWithValue("$s", attempt.State.ToString());
         cmd.Parameters.AddWithValue("$c", attempt.CreatedAt.ToString("O"));
-        cmd.Parameters.AddWithValue("$le", attempt.LeaseExpiresAt?.ToString("O"));
-        cmd.Parameters.AddWithValue("$w", attempt.WorkerId);
-        cmd.Parameters.AddWithValue("$o", attempt.OwnerToken);
+        AddNullable(cmd, "$le", attempt.LeaseExpiresAt?.ToString("O"));
+        AddNullable(cmd, "$w", attempt.WorkerId);
+        AddNullable(cmd, "$o", attempt.OwnerToken);
         await cmd.ExecuteNonQueryAsync(ct);
     }
 
@@ -216,7 +250,17 @@ public sealed class SqliteHarnessStore : IInbox, IOutbox, IHarnessStore, IDispos
         using var cmd = _conn.CreateCommand();
         // Renewal is conditioned on still holding the fencing token. A renewal that silently
         // resurrects a superseded lease is worse than losing it.
-        cmd.CommandText = "UPDATE Leases SET ExpiresAt=$expires WHERE PartitionKey=$pk AND OwnerToken=$token AND ExpiresAt > $now";
+        cmd.CommandText = """
+            UPDATE Leases
+            SET ExpiresAt=$expires
+            WHERE PartitionKey=$pk
+              AND OwnerToken=$token
+              AND ExpiresAt > $now
+              AND NOT EXISTS (
+                  SELECT 1 FROM Attempts
+                  WHERE Id=$pk AND State IN ('Completed', 'LeaseExpired')
+              )
+            """;
         cmd.Parameters.AddWithValue("$expires", expires.ToString("O"));
         cmd.Parameters.AddWithValue("$pk", partitionKey);
         cmd.Parameters.AddWithValue("$token", ownerToken);
@@ -311,7 +355,7 @@ public sealed class SqliteHarnessStore : IInbox, IOutbox, IHarnessStore, IDispos
         return d;
     }
 
-    public async IAsyncEnumerable<Delivery> PendingAsync([System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken ct)
+    public async IAsyncEnumerable<Delivery> PendingDeliveriesAsync([System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken ct)
     {
         using var cmd = _conn.CreateCommand();
         cmd.CommandText = "SELECT Id,RunId,Channel,OutboundKey,Payload,State,Attempts,CreatedAt FROM Deliveries WHERE State='Pending'";
@@ -385,9 +429,12 @@ public sealed class SqliteHarnessStore : IInbox, IOutbox, IHarnessStore, IDispos
         cmd.Parameters.AddWithValue("$p", turn.Payload);
         cmd.Parameters.AddWithValue("$s", turn.State.ToString());
         cmd.Parameters.AddWithValue("$a", turn.CreatedAt.ToString("O"));
-        cmd.Parameters.AddWithValue("$rr", turn.RejectReason);
+        AddNullable(cmd, "$rr", turn.RejectReason);
         await cmd.ExecuteNonQueryAsync(ct);
     }
+
+    private static void AddNullable(SqliteCommand command, string name, object? value) =>
+        command.Parameters.AddWithValue(name, value ?? DBNull.Value);
 
     public void Dispose() => _conn.Dispose();
 }

@@ -6,8 +6,8 @@ namespace AgentHarness.PolicyBridge;
 /// Fork A: the harness consumes policy; it does NOT own it. This bridge relays to ACS/OpenClaw.
 /// It returns a PolicyDecision artifact (never a boolean) so every ToolCall can carry DecisionId.
 ///
-/// Degraded mode (ACS unreachable): Deny everything EXCEPT ACS's own "read" class tools.
-/// Every degraded decision is journaled (Degraded=true) for post-hoc audit.
+/// If ACS is unreachable, the bridge returns no grant. Read continuity, if ever required, must
+/// use a pre-issued ACS-signed standing grant rather than minting authority during an outage.
 /// </summary>
 public interface IPolicyBridge
 {

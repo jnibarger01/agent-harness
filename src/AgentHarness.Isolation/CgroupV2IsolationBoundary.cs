@@ -21,6 +21,7 @@ public sealed class CgroupV2IsolationBoundary : IIsolationBoundary
     private readonly string _scopeUnit;
     private readonly string _cgroupRoot;
     private Process? _process;
+    private string? _spawnedProcessCgroupPath;
 
     public CgroupV2IsolationBoundary(string id, string cgroupRoot = "/sys/fs/cgroup")
     {
@@ -35,9 +36,12 @@ public sealed class CgroupV2IsolationBoundary : IIsolationBoundary
 
     public static bool IsAvailable()
     {
-        // cgroup.controllers only exists on a v2 hierarchy; systemd-run must be on PATH.
+        // cgroup.controllers only exists on a v2 hierarchy; systemd-run must be on PATH and
+        // usable. A container can have the binary and hierarchy mounted while no user systemd
+        // manager is running; selecting cgroups in that state makes the smoke probe falsely
+        // claim the workload was contained.
         if (!File.Exists("/sys/fs/cgroup/cgroup.controllers")) return false;
-        return TryWhich("systemd-run");
+        return TryWhich("systemd-run") && CanStartUserScope();
     }
 
     private static bool TryWhich(string tool)
@@ -51,6 +55,33 @@ public sealed class CgroupV2IsolationBoundary : IIsolationBoundary
 
             probe.WaitForExit(2000);
             return probe.ExitCode == 0;
+        }
+        catch (Exception)
+        {
+            return false;
+        }
+    }
+
+    private static bool CanStartUserScope()
+    {
+        try
+        {
+            var psi = new ProcessStartInfo("systemd-run")
+            {
+                UseShellExecute = false,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+            };
+            psi.ArgumentList.Add("--user");
+            psi.ArgumentList.Add("--scope");
+            psi.ArgumentList.Add("--quiet");
+            psi.ArgumentList.Add("--wait");
+            psi.ArgumentList.Add("true");
+
+            using var probe = Process.Start(psi);
+            if (probe is null) return false;
+            probe.WaitForExit(2000);
+            return probe.HasExited && probe.ExitCode == 0;
         }
         catch (Exception)
         {
@@ -90,6 +121,7 @@ public sealed class CgroupV2IsolationBoundary : IIsolationBoundary
 
         var process = Process.Start(psi) ?? throw new InvalidOperationException("Failed to start systemd scope.");
         _process = process;
+        _spawnedProcessCgroupPath = TryGetCgroupPath(process.Id, _cgroupRoot);
 
         var stdout = DrainAsync(process.StandardOutput, cancellationToken);
         var stderr = DrainAsync(process.StandardError, cancellationToken);
@@ -117,13 +149,40 @@ public sealed class CgroupV2IsolationBoundary : IIsolationBoundary
         return process.ExitCode;
     }
 
-    private string ScopePath =>
-        Path.Combine(_cgroupRoot, "user.slice", $"user-{GetUid()}.slice", $"user@{GetUid()}.service", "app.slice", _scopeUnit);
+    /// <summary>
+    /// Resolve the actual cgroup assigned to the spawned process. Do not reconstruct a systemd
+    /// path from UID: shell UID is commonly not exported, and a fallback such as 1000 can point
+    /// at a nonexistent cgroup while the workload is still running.
+    /// </summary>
+    public string? GetSpawnedProcessCgroupPath()
+    {
+        return _spawnedProcessCgroupPath ??
+            (_process is null ? null : TryGetCgroupPath(_process.Id, _cgroupRoot));
+    }
 
-    private static string GetUid() =>
-        Environment.GetEnvironmentVariable("UID")
-        ?? Environment.GetEnvironmentVariable("SUDO_UID")
-        ?? "1000";
+    public static string? TryGetCgroupPath(int pid, string cgroupRoot = "/sys/fs/cgroup")
+    {
+        try
+        {
+            var procPath = $"/proc/{pid}/cgroup";
+            if (!File.Exists(procPath)) return null;
+
+            var unified = File.ReadLines(procPath)
+                .Select(line => line.Split(new[] { ':' }, 3))
+                .Where(parts => parts.Length == 3 && parts[0] == "0" && parts[1].Length == 0)
+                .Select(parts => parts[2].Trim())
+                .FirstOrDefault(path => path.Length > 0);
+
+            if (string.IsNullOrWhiteSpace(unified) || !unified.StartsWith('/'))
+                return null;
+
+            return Path.Combine(cgroupRoot, unified.TrimStart('/'));
+        }
+        catch (Exception)
+        {
+            return null;
+        }
+    }
 
     public async Task SignalAsync(TerminationSignal signal, CancellationToken cancellationToken)
     {
@@ -149,23 +208,41 @@ public sealed class CgroupV2IsolationBoundary : IIsolationBoundary
     public async Task KillAsync(CancellationToken cancellationToken)
     {
         // One write, whole subtree. This is the entire reason to prefer cgroups.
-        var killFile = Path.Combine(ScopePath, "cgroup.kill");
-        if (File.Exists(killFile))
+        var cgroupPath = GetSpawnedProcessCgroupPath();
+        if (cgroupPath is not null)
         {
-            await File.WriteAllTextAsync(killFile, "1", cancellationToken).ConfigureAwait(false);
-            return;
+            var killFile = Path.Combine(cgroupPath, "cgroup.kill");
+            if (File.Exists(killFile))
+            {
+                await File.WriteAllTextAsync(killFile, "1", cancellationToken).ConfigureAwait(false);
+                return;
+            }
         }
 
+        // Keep the boundary-level fallback for hosts where systemd has already removed the file;
+        // liveness verification remains fail-closed if the cgroup path cannot be resolved.
         await SignalAsync(TerminationSignal.Kill, cancellationToken).ConfigureAwait(false);
     }
 
     public async Task<bool> HasLiveProcessesAsync(CancellationToken cancellationToken)
     {
-        var procsFile = Path.Combine(ScopePath, "cgroup.procs");
-        if (!File.Exists(procsFile)) return false; // scope collected => nothing left, confirmed not assumed.
+        var cgroupPath = GetSpawnedProcessCgroupPath();
+        if (cgroupPath is null) return true;
 
-        var content = await File.ReadAllTextAsync(procsFile, cancellationToken).ConfigureAwait(false);
-        return content.AsSpan().Trim().Length > 0;
+        try
+        {
+            var procsFile = Path.Combine(cgroupPath, "cgroup.procs");
+            if (!File.Exists(procsFile)) return true;
+
+            var content = await File.ReadAllTextAsync(procsFile, cancellationToken).ConfigureAwait(false);
+            return content.AsSpan().Trim().Length > 0;
+        }
+        catch (Exception)
+        {
+            // Cannot determine is live. A false clean result would release the lane while the
+            // workload still owns it.
+            return true;
+        }
     }
 
     public async ValueTask DisposeAsync()
@@ -175,5 +252,6 @@ public sealed class CgroupV2IsolationBoundary : IIsolationBoundary
 
         _process?.Dispose();
         _process = null;
+        _spawnedProcessCgroupPath = null;
     }
 }

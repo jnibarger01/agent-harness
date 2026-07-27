@@ -68,6 +68,12 @@ public sealed class ProcessGroupIsolationBoundary : IIsolationBoundary
         var deadline = DateTimeOffset.UtcNow.AddSeconds(2);
         while (DateTimeOffset.UtcNow < deadline && !cancellationToken.IsCancellationRequested)
         {
+            // On some util-linux versions `setsid --wait` does not leave a visible child in
+            // /proc/<wrapper>/children. Ask the kernel for the wrapper's actual process group
+            // first; the /proc child path remains the fallback for versions that do fork.
+            var ownPgid = getpgid(parentPid);
+            if (ownPgid > 0) return ownPgid;
+
             var childrenPath = $"/proc/{parentPid}/task/{parentPid}/children";
             if (File.Exists(childrenPath))
             {
@@ -138,6 +144,9 @@ public sealed class ProcessGroupIsolationBoundary : IIsolationBoundary
     // authoring the reference implementation).
     [DllImport("libc", SetLastError = true)]
     private static extern int killpg(int pgrp, int sig);
+
+    [DllImport("libc", SetLastError = true)]
+    private static extern int getpgid(int pid);
 
     private const int Sigint = 2;
     private const int Sigkill = 9;

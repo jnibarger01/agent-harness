@@ -2,7 +2,8 @@ using AgentHarness.Domain;
 using AgentHarness.Persistence;
 using Xunit;
 
-namespace AgentHarness.Domain.Tests;
+namespace AgentHarness.Domain.Tests
+{
 
 public class StateMachineTests
 {
@@ -25,19 +26,25 @@ public class StateMachineTests
         // Only Completed (observations reported) is reachable — never Succeeded.
         attempt.Complete();
         Assert.Equal(AttemptState.Completed, attempt.State);
-        Assert.False(Enum.GetNames<AttemptState>().Contains("Succeeded"));
+        Assert.DoesNotContain("Succeeded", Enum.GetNames<AttemptState>());
     }
 
     [Fact]
     public void Attempt_requires_external_work_item_id()
     {
-        var attempt = new Attempt { Id = Guid.NewGuid(), WorkItemId = Guid.Empty, RunId = Guid.NewGuid(), CreatedAt = DateTimeOffset.UtcNow };
-        // Convention enforced by the domain: WorkItemId must be set by ACS, never Guid.Empty.
-        Assert.NotEqual(Guid.Empty, attempt.WorkItemId); // would fail if harness minted it as Empty
+        Assert.Throws<ArgumentException>(() => new Attempt
+        {
+            Id = Guid.NewGuid(),
+            WorkItemId = Guid.Empty,
+            RunId = Guid.NewGuid(),
+            CreatedAt = DateTimeOffset.UtcNow,
+        });
     }
 }
+}
 
-namespace AgentHarness.IntegrationTests;
+namespace AgentHarness.IntegrationTests
+{
 
 /// <summary>
 /// Failure test #1 from the architecture spec:
@@ -52,7 +59,7 @@ public class InboxReplayTests
     {
         var db = $"Data Source=replay_{Guid.NewGuid():N}.db";
         // Simulate "accept" on the first (crashing) instance.
-        await using (var store1 = new SqliteHarnessStore(db))
+        using (var store1 = new SqliteHarnessStore(db))
         {
             var turn = await store1.AcceptAsync("telegram", "update-42", "hello", CancellationToken.None);
             turn.MarkRunning();
@@ -60,9 +67,9 @@ public class InboxReplayTests
         }
 
         // Restart: a fresh store (simulating process restart) must see the accepted Turn.
-        await using var store2 = new SqliteHarnessStore(db);
+        using var store2 = new SqliteHarnessStore(db);
         var pending = new List<Turn>();
-        await foreach (var t in store2.PendingAsync(CancellationToken.None))
+        await foreach (var t in store2.PendingTurnsAsync(CancellationToken.None))
             pending.Add(t);
 
         Assert.Single(pending);
@@ -71,11 +78,12 @@ public class InboxReplayTests
         // Dispatch exactly once.
         var run = new Run { Id = Guid.NewGuid(), TurnId = pending[0].Id, CreatedAt = DateTimeOffset.UtcNow };
         run.Dispatch();
-        await store2.SaveRunAsync(run, CancellationToken.None);
+        pending[0].MarkRunning();
+        await store2.PersistDispatchAsync(pending[0], run, CancellationToken.None);
 
         // A second replay pass must NOT find it again (it's no longer 'Accepted').
         var second = new List<Turn>();
-        await foreach (var t in store2.PendingAsync(CancellationToken.None))
+        await foreach (var t in store2.PendingTurnsAsync(CancellationToken.None))
             second.Add(t);
         Assert.Empty(second);
     }
@@ -84,9 +92,10 @@ public class InboxReplayTests
     public async Task Duplicate_inbound_is_idempotent()
     {
         var db = $"Data Source=dup_{Guid.NewGuid():N}.db";
-        await using var store = new SqliteHarnessStore(db);
+        using var store = new SqliteHarnessStore(db);
         var a = await store.AcceptAsync("telegram", "update-7", "hi", CancellationToken.None);
         var b = await store.AcceptAsync("telegram", "update-7", "hi", CancellationToken.None);
         Assert.Equal(a.Id, b.Id); // same Turn, no duplicate
     }
+}
 }

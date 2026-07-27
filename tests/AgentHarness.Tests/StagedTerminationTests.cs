@@ -6,6 +6,14 @@ namespace AgentHarness.IsolationTests;
 public class StagedTerminationTests
 {
     [Fact]
+    public async Task UnknownCgroupPath_IsLiveNotClean()
+    {
+        await using var boundary = new CgroupV2IsolationBoundary("test", "/does/not/exist");
+
+        Assert.True(await boundary.HasLiveProcessesAsync(CancellationToken.None));
+    }
+
+    [Fact]
     public async Task IgnoresSigterm_EscalatesToKill()
     {
         var boundary = new FakeBoundary(respondsToSigterm: false);
