@@ -36,8 +36,10 @@ public sealed class SqliteHarnessStore : IInbox, IOutbox, IHarnessStore, IDispos
                 Id TEXT PRIMARY KEY, WorkItemId TEXT, RunId TEXT, AgentId TEXT, State TEXT,
                 CreatedAt TEXT, LeaseExpiresAt TEXT, WorkerId TEXT, OwnerToken TEXT);
             CREATE TABLE IF NOT EXISTS Leases (
-                Id TEXT PRIMARY KEY, PartitionKey TEXT, OwnerToken TEXT, ExpiresAt TEXT,
+                PartitionKey TEXT PRIMARY KEY, Id TEXT, OwnerToken TEXT, ExpiresAt TEXT,
                 AcquiredAt TEXT, Kind TEXT);
+            CREATE TABLE IF NOT EXISTS FencingCounters (Name TEXT PRIMARY KEY, Value INTEGER NOT NULL);
+            INSERT OR IGNORE INTO FencingCounters(Name, Value) VALUES ('global', 0);
             CREATE TABLE IF NOT EXISTS Conversations (
                 Id TEXT PRIMARY KEY, Channel TEXT, ExternalId TEXT, CreatedAt TEXT);
             CREATE TABLE IF NOT EXISTS Deliveries (
@@ -152,28 +154,125 @@ public sealed class SqliteHarnessStore : IInbox, IOutbox, IHarnessStore, IDispos
         return list;
     }
 
-    public async Task SaveLeaseAsync(Lease lease, CancellationToken ct)
+    /// <summary>
+    /// Fencing is enforced in the WHERE clause, not in application logic. The failure this
+    /// prevents: worker A holds token 41, wedges, its lease expires, worker B acquires token 42,
+    /// then A wakes up and writes. Zero affected rows is how A finds out it no longer owns
+    /// anything (see docs/DECISIONS.md).
+    /// </summary>
+    public async Task<Lease?> TryAcquireLeaseAsync(string partitionKey, LeaseKind kind, TimeSpan ttl, CancellationToken ct)
+    {
+        var now = DateTimeOffset.UtcNow;
+        var expires = now + ttl;
+
+        using var tx = _conn.BeginTransaction();
+        var token = await NextFencingTokenAsync(tx, ct);
+        var leaseId = Guid.NewGuid();
+
+        using (var cmd = _conn.CreateCommand())
+        {
+            cmd.Transaction = tx;
+            // Upsert, but only over a lease that has actually expired (or does not exist yet).
+            // An unexpired lease held by someone else must not be stolen.
+            cmd.CommandText = """
+                INSERT INTO Leases(PartitionKey, Id, OwnerToken, ExpiresAt, AcquiredAt, Kind)
+                VALUES ($pk, $id, $token, $expires, $acquired, $kind)
+                ON CONFLICT(PartitionKey) DO UPDATE SET
+                    Id = excluded.Id,
+                    OwnerToken = excluded.OwnerToken,
+                    ExpiresAt = excluded.ExpiresAt,
+                    AcquiredAt = excluded.AcquiredAt,
+                    Kind = excluded.Kind
+                WHERE Leases.ExpiresAt <= $acquired;
+                """;
+            cmd.Parameters.AddWithValue("$pk", partitionKey);
+            cmd.Parameters.AddWithValue("$id", leaseId.ToString());
+            cmd.Parameters.AddWithValue("$token", token.ToString());
+            cmd.Parameters.AddWithValue("$expires", expires.ToString("O"));
+            cmd.Parameters.AddWithValue("$acquired", now.ToString("O"));
+            cmd.Parameters.AddWithValue("$kind", kind.ToString());
+
+            var rows = await cmd.ExecuteNonQueryAsync(ct);
+            if (rows == 0)
+            {
+                tx.Rollback();
+                return null;
+            }
+        }
+
+        tx.Commit();
+        return new Lease
+        {
+            Id = leaseId, PartitionKey = partitionKey, OwnerToken = token.ToString(),
+            ExpiresAt = expires, AcquiredAt = now, Kind = kind
+        };
+    }
+
+    public async Task<Lease?> TryRenewLeaseAsync(string partitionKey, string ownerToken, TimeSpan ttl, CancellationToken ct)
+    {
+        var now = DateTimeOffset.UtcNow;
+        var expires = now + ttl;
+
+        using var cmd = _conn.CreateCommand();
+        // Renewal is conditioned on still holding the fencing token. A renewal that silently
+        // resurrects a superseded lease is worse than losing it.
+        cmd.CommandText = "UPDATE Leases SET ExpiresAt=$expires WHERE PartitionKey=$pk AND OwnerToken=$token AND ExpiresAt > $now";
+        cmd.Parameters.AddWithValue("$expires", expires.ToString("O"));
+        cmd.Parameters.AddWithValue("$pk", partitionKey);
+        cmd.Parameters.AddWithValue("$token", ownerToken);
+        cmd.Parameters.AddWithValue("$now", now.ToString("O"));
+
+        var rows = await cmd.ExecuteNonQueryAsync(ct);
+        if (rows != 1) return null;
+
+        return await GetLeaseAsync(partitionKey, ct);
+    }
+
+    public async Task<bool> TryReleaseLeaseAsync(string partitionKey, string ownerToken, CancellationToken ct)
     {
         using var cmd = _conn.CreateCommand();
-        cmd.CommandText = "INSERT OR REPLACE INTO Leases(Id,PartitionKey,OwnerToken,ExpiresAt,AcquiredAt,Kind) VALUES($id,$p,$o,$e,$a,$k)";
-        cmd.Parameters.AddWithValue("$id", lease.Id.ToString());
-        cmd.Parameters.AddWithValue("$p", lease.PartitionKey);
-        cmd.Parameters.AddWithValue("$o", lease.OwnerToken);
-        cmd.Parameters.AddWithValue("$e", lease.ExpiresAt.ToString("O"));
-        cmd.Parameters.AddWithValue("$a", lease.AcquiredAt.ToString("O"));
-        cmd.Parameters.AddWithValue("$k", lease.Kind.ToString());
-        await cmd.ExecuteNonQueryAsync(ct);
+        cmd.CommandText = "DELETE FROM Leases WHERE PartitionKey=$pk AND OwnerToken=$token";
+        cmd.Parameters.AddWithValue("$pk", partitionKey);
+        cmd.Parameters.AddWithValue("$token", ownerToken);
+        return await cmd.ExecuteNonQueryAsync(ct) == 1;
     }
 
     public async Task<IReadOnlyList<Lease>> ExpiredLeasesAsync(DateTimeOffset now, CancellationToken ct)
     {
         var list = new List<Lease>();
         using var cmd = _conn.CreateCommand();
-        cmd.CommandText = "SELECT Id,PartitionKey,OwnerToken,ExpiresAt,AcquiredAt,Kind FROM Leases WHERE ExpiresAt <= $now";
+        cmd.CommandText = "SELECT PartitionKey,Id,OwnerToken,ExpiresAt,AcquiredAt,Kind FROM Leases WHERE ExpiresAt <= $now";
         cmd.Parameters.AddWithValue("$now", now.ToString("O"));
         using var r = await cmd.ExecuteReaderAsync(ct);
         while (await r.ReadAsync(ct)) list.Add(ReadLease(r));
         return list;
+    }
+
+    private async Task<Lease?> GetLeaseAsync(string partitionKey, CancellationToken ct)
+    {
+        using var cmd = _conn.CreateCommand();
+        cmd.CommandText = "SELECT PartitionKey,Id,OwnerToken,ExpiresAt,AcquiredAt,Kind FROM Leases WHERE PartitionKey=$pk";
+        cmd.Parameters.AddWithValue("$pk", partitionKey);
+        using var r = await cmd.ExecuteReaderAsync(ct);
+        return await r.ReadAsync(ct) ? ReadLease(r) : null;
+    }
+
+    /// <summary>Monotonic across the whole store. Two separate statements in one transaction — a
+    /// combined UPDATE-then-SELECT command text is not relied on here.</summary>
+    private async Task<long> NextFencingTokenAsync(SqliteTransaction tx, CancellationToken ct)
+    {
+        using (var update = _conn.CreateCommand())
+        {
+            update.Transaction = tx;
+            update.CommandText = "UPDATE FencingCounters SET Value = Value + 1 WHERE Name = 'global'";
+            await update.ExecuteNonQueryAsync(ct);
+        }
+
+        using var select = _conn.CreateCommand();
+        select.Transaction = tx;
+        select.CommandText = "SELECT Value FROM FencingCounters WHERE Name = 'global'";
+        var result = await select.ExecuteScalarAsync(ct);
+        return Convert.ToInt64(result);
     }
 
     public async Task<Conversation> GetOrCreateConversationAsync(string channel, string externalId, CancellationToken ct)
@@ -249,8 +348,8 @@ public sealed class SqliteHarnessStore : IInbox, IOutbox, IHarnessStore, IDispos
 
     private static Lease ReadLease(SqliteDataReader r) => new()
     {
-        Id = Guid.Parse(r.GetString(0)), PartitionKey = r.GetString(1), OwnerToken = r.GetString(2),
-        ExpiresAt = DateTimeOffset.Parse(r.GetString(3)), CreatedAt = DateTimeOffset.Parse(r.GetString(4)),
+        PartitionKey = r.GetString(0), Id = Guid.Parse(r.GetString(1)), OwnerToken = r.GetString(2),
+        ExpiresAt = DateTimeOffset.Parse(r.GetString(3)), AcquiredAt = DateTimeOffset.Parse(r.GetString(4)),
         Kind = Enum.Parse<LeaseKind>(r.GetString(5))
     };
 

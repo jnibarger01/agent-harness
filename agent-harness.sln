@@ -18,6 +18,12 @@ Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "AgentHarness.ControlPlane",
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "AgentHarness.Tests", "tests\AgentHarness.Tests\AgentHarness.Tests.csproj", "{A8888888-8888-8888-8888-888888888888}"
 EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "AgentHarness.Isolation", "src\AgentHarness.Isolation\AgentHarness.Isolation.csproj", "{A9999999-9999-9999-9999-999999999999}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "AgentHarness.Tools", "src\AgentHarness.Tools\AgentHarness.Tools.csproj", "{AAAAAAAA-AAAA-AAAA-AAAA-AAAAAAAAAAAA}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "AgentHarness.IsolationSmoke", "tools\AgentHarness.IsolationSmoke\AgentHarness.IsolationSmoke.csproj", "{ABBBBBBB-BBBB-BBBB-BBBB-BBBBBBBBBBBB}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -56,6 +62,18 @@ Global
 		{A8888888-8888-8888-8888-888888888888}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{A8888888-8888-8888-8888-888888888888}.Release|Any CPU.ActiveCfg = Release|Any CPU
 		{A8888888-8888-8888-8888-888888888888}.Release|Any CPU.Build.0 = Release|Any CPU
+		{A9999999-9999-9999-9999-999999999999}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{A9999999-9999-9999-9999-999999999999}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{A9999999-9999-9999-9999-999999999999}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{A9999999-9999-9999-9999-999999999999}.Release|Any CPU.Build.0 = Release|Any CPU
+		{AAAAAAAA-AAAA-AAAA-AAAA-AAAAAAAAAAAA}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{AAAAAAAA-AAAA-AAAA-AAAA-AAAAAAAAAAAA}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{AAAAAAAA-AAAA-AAAA-AAAA-AAAAAAAAAAAA}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{AAAAAAAA-AAAA-AAAA-AAAA-AAAAAAAAAAAA}.Release|Any CPU.Build.0 = Release|Any CPU
+		{ABBBBBBB-BBBB-BBBB-BBBB-BBBBBBBBBBBB}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{ABBBBBBB-BBBB-BBBB-BBBB-BBBBBBBBBBBB}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{ABBBBBBB-BBBB-BBBB-BBBB-BBBBBBBBBBBB}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{ABBBBBBB-BBBB-BBBB-BBBB-BBBBBBBBBBBB}.Release|Any CPU.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE

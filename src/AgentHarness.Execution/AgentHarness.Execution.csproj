@@ -8,5 +8,6 @@
   <ItemGroup>
     <ProjectReference Include="..\AgentHarness.Domain\AgentHarness.Domain.csproj" />
     <ProjectReference Include="..\AgentHarness.Persistence\AgentHarness.Persistence.csproj" />
+    <ProjectReference Include="..\AgentHarness.Isolation\AgentHarness.Isolation.csproj" />
   </ItemGroup>
 </Project>

@@ -90,3 +90,28 @@ runtime-queried via `PolicyBridge`. The config file can never widen authority.
 `System.Threading.Channels` is a local accelerator only. The system of record is SQLite
 (inbox/outbox/store/journal). PostgreSQL replaces SQLite in Phase 5 by re-implementing the
 same interfaces — the claim logic does not change.
+
+## Phase 2: from stated principle to enforcing code
+
+The principles above were correct from the start; three of them shipped as prose with no code
+behind them. `AgentHarness.Isolation`, the `IHarnessStore` lease methods, and
+`AgentHarness.Tools.Enforcement` close that gap. See `docs/DECISIONS.md` for the short form.
+
+- **Killable execution (principle #2).** `ExecutionSupervisor` used to spawn a bare
+  `System.Diagnostics.Process` and call empty `NativeSetProcessGroup`/`NativeKillProcessGroup`
+  stubs. `IIsolationBoundary` (cgroup v2 in production, process group via `setsid`/`killpg` as
+  the explicit fallback) plus `StagedTermination` make the two-tier cancel real: cooperative
+  token → protocol cancel → grace → SIGTERM → grace → kill the boundary → **verify** no
+  processes remain. `tools/AgentHarness.IsolationSmoke` proves it against a workload that traps
+  SIGTERM and forks a child — the wedge shape — rather than asserting it in a comment.
+- **Fencing tokens (principle #1, "one logical authority").** `Lease.OwnerToken` was
+  documented as a fencing token but `SaveLeaseAsync` was a blind `INSERT OR REPLACE` — nothing
+  stopped a wedged holder from overwriting a successor's lease. `IHarnessStore` now exposes
+  `TryAcquireLeaseAsync`/`TryRenewLeaseAsync`/`TryReleaseLeaseAsync`, each conditioned on the
+  fencing token inside the SQL `WHERE` clause; zero affected rows is how a stale holder finds
+  out it no longer owns anything.
+- **Enforcement at the call site (principles #5-#7).** Journaled replay could previously only
+  *detect* a policy violation after the fact. `GrantEnforcer.Check` is the point a worker loop
+  calls before invoking a tool: deny-by-default, checks verdict/expiry/narrowed-scope/degraded
+  flag, and (via `PathContainment`) the write-scope containment the "Seam test" section already
+  promised but had no code enforcing.

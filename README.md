@@ -39,32 +39,56 @@ rationale. `AgentHarness.Policy` does **not** exist by design.
 ```
 src/
   AgentHarness.Domain/         Turn, Run, Attempt, Lease, ToolCall, Conversation, Artifact, Delivery (state machines)
-  AgentHarness.Persistence/    IInbox/IOutbox/IHarnessStore + SQLite impl (system of record)
+  AgentHarness.Persistence/    IInbox/IOutbox/IHarnessStore + SQLite impl (system of record);
+                                lease acquire/renew/release conditioned on a fencing token in the WHERE clause
   AgentHarness.Observability/  ITurnJournal + SQLite impl (append-only, replay violations)
   AgentHarness.PolicyBridge/   IPolicyBridge + PolicyDecision artifact (Fork A; NO local policy)
-  AgentHarness.Execution/       ExecutionSupervisor (killable workers, 2-tier cancel, lease reclaim)
+  AgentHarness.Isolation/      IIsolationBoundary (cgroup v2 + process-group impls) + StagedTermination ladder
+  AgentHarness.Tools/           GrantEnforcer + PathContainment (deny-by-default enforcement of a PolicyDecision)
+  AgentHarness.Execution/       ExecutionSupervisor (killable workers via IIsolationBoundary, staged cancel, lease reclaim)
   AgentHarness.Worker/          Killable worker process (takes CT; reports observations)
   AgentHarness.ControlPlane/    Generic Host + BackgroundService inbox processor
+tools/
+  AgentHarness.IsolationSmoke/  Adversarial, runnable proof of the kill path (see "Verify the kill path" below)
 tests/
-  AgentHarness.Tests/           State-machine + inbox-replay (crash) failure tests
+  AgentHarness.Tests/           State-machine, inbox-replay, lease-fencing, staged-termination and
+                                grant-enforcement tests
 ```
 
 ## Build order
 
 - **Phase 1 (implemented here):** Domain entities, SQLite persistence, inbox/outbox,
-  console ingress, one worker process, heartbeats/deadlines/cancel/process-group kill.
-- Phase 2+: leases + attempt reclamation, restart recovery, idempotent inbound, delivery
-  retries, failure tests, model routing (MEAI), real channels, ACP adapter, PostgreSQL,
-  multiple control-plane replicas.
+  console ingress, one worker process, heartbeats/deadlines.
+- **Phase 2 (implemented here):** real process isolation and staged termination
+  (`AgentHarness.Isolation`), fencing-token-conditioned lease acquire/renew/release
+  (`SqliteHarnessStore`), and deny-by-default tool-call enforcement of a `PolicyDecision`
+  (`AgentHarness.Tools.Enforcement.GrantEnforcer`). These three replace what were previously
+  documented principles with no enforcing code behind them.
+- Phase 3+: restart recovery wired end-to-end through `ExecutionSupervisor`, idempotent
+  inbound, delivery retries, model routing (MEAI), real channels, ACP adapter, PostgreSQL,
+  multiple control-plane replicas, a richer versioned worker protocol (attempt envelope down /
+  terminal report up, modeled as an explicit `ObservedOutcome` with no `Success` member).
 
 ## Running
 
 Requires .NET 9 SDK.
 
 ```
-dotnet test            # runs the crash-replay + state-machine failure tests
+dotnet test            # runs the crash-replay, state-machine, lease-fencing and grant tests
 dotnet run --project src/AgentHarness.ControlPlane
 ```
+
+## Verify the kill path
+
+The termination ladder has a runnable adversarial probe. The workload traps SIGTERM and forks
+a child — the exact shape of the wedge this project exists to prevent:
+
+```
+dotnet run --project tools/AgentHarness.IsolationSmoke
+```
+
+Prints the boundary kind, the stages entered, and `RESULT: PASS|FAIL`. Exit code 0 on pass.
+Run it on the target host: cgroup v2 availability is a property of the box, not of this repo.
 
 ## Note on this scaffold
 

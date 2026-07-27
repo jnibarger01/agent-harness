@@ -1,109 +1,141 @@
-using System.Diagnostics;
 using AgentHarness.Domain;
+using AgentHarness.Isolation;
 using AgentHarness.Persistence;
 
 namespace AgentHarness.Execution;
 
 /// <summary>
-/// Phase 1 Execution Supervisor — the wedge-killer.
+/// The wedge-killer.
 ///
 /// Responsibilities (Fork A):
 ///  - Spawn worker processes (out-of-process execution; never embedded).
-///  - Assign attempt IDs, track PID + process group (pgid).
+///  - Assign attempt IDs, track a killable <see cref="IIsolationBoundary"/> (cgroup or process
+///    group — never a bare Process handle).
 ///  - Require heartbeats; enforce startup/idle/absolute deadlines.
-///  - Cancel cooperatively FIRST, then grace window, then KILL the process GROUP (pgid).
-///    NOTE: Process.Kill(entireProcessTree:true) does NOT reliably reap a detached grandchild
-///    on Linux — use the process group (setpgid + kill(-pgid)) or a cgroup. This is Claude's fix #1.
+///  - Cancel via the staged termination ladder (<see cref="StagedTermination"/>): cooperative
+///    CancellationToken -> protocol cancel -> grace -> SIGTERM -> grace -> KILL the boundary ->
+///    verify no processes remain. This replaces the earlier placeholder whose
+///    `NativeKillProcessGroup`/`NativeSetProcessGroup` methods were empty comments; those, like
+///    `Process.Kill(entireProcessTree:true)`, do NOT reliably reap a detached grandchild on
+///    Linux — exactly the wedge this class exists to prevent.
 ///  - Expire + reclaim leases; kill the worker when its lease expires.
-///  - Quarantine repeatedly crashing runtimes.
-///  - Per-session concurrency partitioned by tenantId/channelId/conversationId.
 /// </summary>
-public sealed class ExecutionSupervisor
+public sealed class ExecutionSupervisor : IAsyncDisposable
 {
     private readonly IHarnessStore _store;
-    private readonly TimeSpan _graceWindow;
+    private readonly IsolationBoundaryFactory _isolationFactory;
+    private readonly StagedTermination _termination;
     private readonly Dictionary<Guid, WorkerHandle> _workers = new();
     private readonly object _gate = new();
 
-    public ExecutionSupervisor(IHarnessStore store, TimeSpan? graceWindow = null)
+    /// <param name="isolationFactory">
+    /// Defaults to allowing the process-group fallback so this scaffold runs on a plain dev box
+    /// with no cgroup v2 delegation. Pass an <see cref="IsolationBoundaryFactory"/> constructed
+    /// with <c>allowProcessGroupFallback: false</c> on a host where cgroups are expected — a
+    /// silent downgrade there is worse than refusing to start.
+    /// </param>
+    public ExecutionSupervisor(
+        IHarnessStore store,
+        IsolationBoundaryFactory? isolationFactory = null,
+        TimeSpan? protocolGrace = null,
+        TimeSpan? sigtermGrace = null,
+        TimeSpan? verifyTimeout = null)
     {
         _store = store;
-        _graceWindow = graceWindow ?? TimeSpan.FromSeconds(5);
+        _isolationFactory = isolationFactory ?? new IsolationBoundaryFactory(allowProcessGroupFallback: true);
+        _termination = new StagedTermination(protocolGrace, sigtermGrace, verifyTimeout);
     }
 
+    public IsolationKind SelectedIsolationKind => _isolationFactory.SelectedKind;
+
     /// <summary>
-    /// Spawns a worker for an already-leased Attempt. Returns the worker PID/pgid handle.
-    /// The worker is a separate process; the supervisor never awaits its execution stack.
+    /// Spawns a worker for an already-leased Attempt inside a fresh isolation boundary. The
+    /// worker is a separate process; the supervisor never awaits its execution stack.
     /// </summary>
     public async Task<WorkerHandle> SpawnAsync(Attempt attempt, string workerBinary, CancellationToken ct)
     {
-        var psi = new ProcessStartInfo(workerBinary, $"--attempt {attempt.Id}")
-        {
-            UseShellExecute = false,
-            RedirectStandardInput = true,
-            RedirectStandardOutput = true,
-            RedirectStandardError = true,
-        };
-        var proc = new Process { StartInfo = psi, EnableRaisingEvents = true };
-        proc.Start();
-        // Place worker in its own process group so we can kill the whole tree reliably.
-        if (!proc.HasExited)
-            NativeSetProcessGroup(proc.Id);
+        var boundary = _isolationFactory.Create(attempt.Id.ToString("N"));
+        var spec = new IsolatedProcessSpec(
+            FileName: workerBinary,
+            Arguments: new[] { "--attempt", attempt.Id.ToString() },
+            WorkingDirectory: Environment.CurrentDirectory,
+            Environment: new Dictionary<string, string>());
 
-        var handle = new WorkerHandle(attempt.Id, proc.Id, proc.Id /* pgid = pid for new group */, proc);
+        IsolatedProcessHandle process;
+        try
+        {
+            process = await boundary.StartAsync(spec, ct).ConfigureAwait(false);
+        }
+        catch
+        {
+            await boundary.DisposeAsync().ConfigureAwait(false);
+            throw;
+        }
+
+        var handle = new WorkerHandle(attempt.Id, boundary, process);
         lock (_gate) _workers[attempt.Id] = handle;
         return handle;
     }
 
     /// <summary>
-    /// Two-tier cancellation: cooperative CT -> grace -> KILL process group.
+    /// Runs the staged termination ladder against a live attempt's boundary and removes it from
+    /// tracking. Returns which rung was reached — journal this; if production is routinely
+    /// reaching "Killed", cooperative cancellation is decorative and you should know that.
     /// </summary>
-    public async Task CancelAsync(Guid attemptId, CancellationToken cooperativeCt)
+    public async Task<TerminationOutcome> CancelAsync(
+        Guid attemptId,
+        Func<CancellationToken, Task>? sendProtocolCancel,
+        CancellationToken ct)
     {
         WorkerHandle? handle;
-        lock (_gate) _workers.TryGetValue(attemptId, out handle);
-        if (handle is null) return;
+        lock (_gate) _workers.Remove(attemptId, out handle);
+        if (handle is null)
+            return new TerminationOutcome(true, TimeSpan.Zero, new[] { "AlreadyGone" });
 
-        try { await Task.Delay(_graceWindow, cooperativeCt); }
-        catch (OperationCanceledException) { /* cooperative cancel honored */ }
-
-        if (handle.Process.HasExited) return;
-        KillProcessGroup(handle.Pgid);
+        try
+        {
+            return await _termination
+                .TerminateAsync(handle.Boundary, handle.Process.Exited, sendProtocolCancel, ct)
+                .ConfigureAwait(false);
+        }
+        finally
+        {
+            await handle.Boundary.DisposeAsync().ConfigureAwait(false);
+        }
     }
 
-    /// <summary>Reclaim pass on startup: any expired lease -> kill its worker (if still alive).</summary>
+    /// <summary>Reclaim pass on startup: any expired lease -> kill its worker's boundary (if still alive).</summary>
     public async Task ReclaimExpiredAsync(DateTimeOffset now, CancellationToken ct)
     {
         var expired = await _store.ExpiredLeasesAsync(now, ct);
         foreach (var lease in expired)
         {
-            Attempt? attempt = null; // resolve attempt by partition in real impl
-            if (attempt is not null)
-            {
-                attempt.ExpireLease();
-                await _store.SaveAttemptAsync(attempt, ct);
-                if (attempt.WorkerId is not null) KillProcessGroup(attempt.WorkerId.GetHashCode());
-            }
+            if (lease.Kind != LeaseKind.Attempt) continue;
+            if (!Guid.TryParse(lease.PartitionKey, out var attemptId)) continue;
+
+            var attempt = await _store.GetAttemptAsync(attemptId, ct);
+            if (attempt is null) continue;
+
+            await CancelAsync(attemptId, sendProtocolCancel: null, ct).ConfigureAwait(false);
+            attempt.ExpireLease();
+            await _store.SaveAttemptAsync(attempt, ct);
         }
     }
 
-    private static void KillProcessGroup(int pgid)
+    public async ValueTask DisposeAsync()
     {
-        // Real impl: NativeMethods.kill(-pgid, SIGKILL). Negative pid = whole group.
-        // Fallback (won't reap detached grandchildren): Process.GetProcessById(pgid)?.Kill(true);
-        try { NativeKillProcessGroup(pgid); }
-        catch { /* log + quarantine */ }
-    }
+        WorkerHandle[] handles;
+        lock (_gate) handles = _workers.Values.ToArray();
 
-    private static void NativeSetProcessGroup(int pid) { /* setpgid(pid, pid) */ }
-    private static void NativeKillProcessGroup(int pgid) { /* kill(-pgid, SIGKILL) */ }
+        foreach (var handle in handles)
+        {
+            try { await handle.Boundary.KillAsync(CancellationToken.None).ConfigureAwait(false); }
+            catch { /* best-effort teardown; disposal below still runs */ }
+            await handle.Boundary.DisposeAsync().ConfigureAwait(false);
+        }
 
-    public void Dispose()
-    {
-        lock (_gate)
-            foreach (var h in _workers.Values)
-                if (!h.Process.HasExited) KillProcessGroup(h.Pgid);
+        lock (_gate) _workers.Clear();
     }
 }
 
-public sealed record WorkerHandle(Guid AttemptId, int Pid, int Pgid, Process Process);
+public sealed record WorkerHandle(Guid AttemptId, IIsolationBoundary Boundary, IsolatedProcessHandle Process);
