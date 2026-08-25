@@ -10,7 +10,7 @@ namespace AgentHarness.Persistence;
 /// This is the SYSTEM OF RECORD — not an in-memory queue.
 /// Swap to PostgreSQL in Phase 5 by reimplementing these interfaces; claim logic unchanged.
 /// </summary>
-public sealed class SqliteHarnessStore : IInbox, IOutbox, IHarnessStore, IDisposable
+public sealed class SqliteHarnessStore : IInbox, IOutbox, IHarnessStore, IDisposable, IAsyncDisposable
 {
     private readonly SqliteConnection _conn;
 
@@ -311,7 +311,9 @@ public sealed class SqliteHarnessStore : IInbox, IOutbox, IHarnessStore, IDispos
         return d;
     }
 
-    public async IAsyncEnumerable<Delivery> PendingAsync([System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken ct)
+    // Explicit implementation: IInbox.PendingAsync (Turn) and IOutbox.PendingAsync (Delivery)
+    // share a name and parameter list, so only one may be a regular public method (CS0111).
+    async IAsyncEnumerable<Delivery> IOutbox.PendingAsync([System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken ct)
     {
         using var cmd = _conn.CreateCommand();
         cmd.CommandText = "SELECT Id,RunId,Channel,OutboundKey,Payload,State,Attempts,CreatedAt FROM Deliveries WHERE State='Pending'";
@@ -390,4 +392,10 @@ public sealed class SqliteHarnessStore : IInbox, IOutbox, IHarnessStore, IDispos
     }
 
     public void Dispose() => _conn.Dispose();
+
+    public ValueTask DisposeAsync()
+    {
+        _conn.Dispose();
+        return ValueTask.CompletedTask;
+    }
 }
