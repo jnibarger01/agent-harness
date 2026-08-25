@@ -51,7 +51,17 @@ public sealed record IsolatedProcessSpec(
     long? MemoryLimitBytes = null,
     double? CpuQuota = null);
 
-public sealed record IsolatedProcessHandle(int Pid, StreamWriter StandardInput, Task<int> Exited);
+/// <param name="Output">
+/// Resolves once both redirected pipes have hit EOF (shortly after <paramref name="Exited"/> on a
+/// clean exit; on a forced kill, once the pipes close). Bounded — see <see cref="OutputCapture"/>.
+/// </param>
+public sealed record IsolatedProcessHandle(int Pid, StreamWriter StandardInput, Task<int> Exited, Task<CapturedOutput> Output);
+
+/// <summary>Bounded stdout/stderr captured from a worker process. See <see cref="OutputCapture"/>.</summary>
+public sealed record CapturedOutput(string Stdout, string Stderr, bool StdoutTruncated, bool StderrTruncated)
+{
+    public static readonly CapturedOutput Empty = new("", "", false, false);
+}
 
 public sealed record TerminationOutcome(
     bool ProcessesConfirmedGone,

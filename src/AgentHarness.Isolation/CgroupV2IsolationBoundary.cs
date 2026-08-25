@@ -91,29 +91,19 @@ public sealed class CgroupV2IsolationBoundary : IIsolationBoundary
         var process = Process.Start(psi) ?? throw new InvalidOperationException("Failed to start systemd scope.");
         _process = process;
 
-        var stdout = DrainAsync(process.StandardOutput, cancellationToken);
-        var stderr = DrainAsync(process.StandardError, cancellationToken);
-        var exited = WaitAsync(process, stdout, stderr);
+        var stdoutCapture = OutputCapture.CaptureAsync(process.StandardOutput, cancellationToken);
+        var stderrCapture = OutputCapture.CaptureAsync(process.StandardError, cancellationToken);
+        var exited = WaitAsync(process, stdoutCapture, stderrCapture);
+        var output = OutputCapture.BuildResultAsync(stdoutCapture, stderrCapture);
 
-        return Task.FromResult(new IsolatedProcessHandle(process.Id, process.StandardInput, exited));
+        return Task.FromResult(new IsolatedProcessHandle(process.Id, process.StandardInput, exited, output));
     }
 
-    private static async Task DrainAsync(StreamReader reader, CancellationToken cancellationToken)
-    {
-        var buffer = new char[4096];
-        while (!cancellationToken.IsCancellationRequested)
-        {
-            var read = await reader.ReadAsync(buffer, cancellationToken).ConfigureAwait(false);
-            if (read == 0) return;
-        }
-    }
-
-    private static async Task<int> WaitAsync(Process process, Task stdout, Task stderr)
+    private static async Task<int> WaitAsync(
+        Process process, Task<(string Text, bool Truncated)> stdout, Task<(string Text, bool Truncated)> stderr)
     {
         await process.WaitForExitAsync().ConfigureAwait(false);
-        try { await Task.WhenAll(stdout, stderr).ConfigureAwait(false); }
-        catch (OperationCanceledException) { /* boundary torn down while draining */ }
-
+        await Task.WhenAll(stdout, stderr).ConfigureAwait(false);
         return process.ExitCode;
     }
 
