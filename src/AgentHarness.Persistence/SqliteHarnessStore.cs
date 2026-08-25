@@ -91,7 +91,10 @@ public sealed class SqliteHarnessStore : IInbox, IOutbox, IHarnessStore, IDispos
     public async Task SaveRunAsync(Run run, CancellationToken ct)
     {
         using var cmd = _conn.CreateCommand();
-        cmd.CommandText = "INSERT OR REPLACE INTO Runs(Id,TurnId,State,CreatedAt) VALUES($id,$t,$s,$c)";
+        cmd.CommandText = """
+            INSERT OR REPLACE INTO Runs(Id,TurnId,State,CreatedAt) VALUES($id,$t,$s,$c);
+            UPDATE Turns SET State='Running' WHERE Id=$t AND State='Accepted';
+            """;
         cmd.Parameters.AddWithValue("$id", run.Id.ToString());
         cmd.Parameters.AddWithValue("$t", run.TurnId.ToString());
         cmd.Parameters.AddWithValue("$s", run.State.ToString());
@@ -387,7 +390,7 @@ public sealed class SqliteHarnessStore : IInbox, IOutbox, IHarnessStore, IDispos
         cmd.Parameters.AddWithValue("$p", turn.Payload);
         cmd.Parameters.AddWithValue("$s", turn.State.ToString());
         cmd.Parameters.AddWithValue("$a", turn.CreatedAt.ToString("O"));
-        cmd.Parameters.AddWithValue("$rr", turn.RejectReason);
+        cmd.Parameters.Add("$rr", SqliteType.Text).Value = (object?)turn.RejectReason ?? DBNull.Value;
         await cmd.ExecuteNonQueryAsync(ct);
     }
 

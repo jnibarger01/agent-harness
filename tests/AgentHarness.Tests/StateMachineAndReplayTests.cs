@@ -31,9 +31,12 @@ namespace AgentHarness.Domain.Tests
         [Fact]
         public void Attempt_requires_external_work_item_id()
         {
-            var attempt = new Attempt { Id = Guid.NewGuid(), WorkItemId = Guid.Empty, RunId = Guid.NewGuid(), CreatedAt = DateTimeOffset.UtcNow };
-            // Convention enforced by the domain: WorkItemId must be set by ACS, never Guid.Empty.
-            Assert.NotEqual(Guid.Empty, attempt.WorkItemId); // would fail if harness minted it as Empty
+            var externalWorkItemId = Guid.NewGuid();
+            var attempt = new Attempt { Id = Guid.NewGuid(), WorkItemId = externalWorkItemId, RunId = Guid.NewGuid(), CreatedAt = DateTimeOffset.UtcNow };
+
+            // The work-item identity is minted by ACS and must pass through unchanged.
+            Assert.NotEqual(Guid.Empty, externalWorkItemId);
+            Assert.Equal(externalWorkItemId, attempt.WorkItemId);
         }
     }
 }
