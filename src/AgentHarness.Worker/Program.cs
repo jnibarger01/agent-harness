@@ -58,4 +58,6 @@ public sealed record StartAttemptCommand(
     Guid AttemptId, Guid RunId, string AgentId, string ProtocolVersion,
     string Model, IReadOnlyList<string> GrantedCapabilities, DateTimeOffset Deadline);
 
-public sealed record WorkerEvent(Guid AttemptId, long Sequence, string Type, JsonElement Payload, DateTimeOffset OccurredAt);
+public sealed record WorkerEvent(Guid AttemptId, long Sequence, WorkerEventType Type, JsonElement Payload, DateTimeOffset OccurredAt);
+
+public enum WorkerEventType { Heartbeat, Completed }

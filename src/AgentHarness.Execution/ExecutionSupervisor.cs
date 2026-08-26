@@ -72,17 +72,52 @@ public sealed class ExecutionSupervisor : IAsyncDisposable
             throw;
         }
 
-        var handle = new WorkerHandle(attempt.Id, boundary, process);
+        var handle = new WorkerHandle(attempt.Id, boundary, process, DateTimeOffset.UtcNow);
         lock (_gate) _workers[attempt.Id] = handle;
         return handle;
     }
 
     /// <summary>
-    /// Runs the staged termination ladder against a live attempt's boundary and removes it from
-    /// tracking. Returns which rung was reached — journal this; if production is routinely
-    /// reaching "Killed", cooperative cancellation is decorative and you should know that.
+    /// Awaits a spawned worker's own exit (no termination ladder) and returns the standardized
+    /// result envelope. Use when the worker is expected to finish on its own, e.g. before its
+    /// deadline. Removes the attempt from tracking and disposes its boundary either way.
     /// </summary>
-    public async Task<TerminationOutcome> CancelAsync(
+    public async Task<AttemptResult> WaitForExitAsync(Guid attemptId, CancellationToken ct)
+    {
+        WorkerHandle? handle;
+        lock (_gate) _workers.Remove(attemptId, out handle);
+        if (handle is null)
+            throw new InvalidOperationException($"No tracked worker for attempt {attemptId}.");
+
+        try
+        {
+            var exitCode = await handle.Process.Exited.WaitAsync(ct).ConfigureAwait(false);
+            var output = await handle.Process.Output.ConfigureAwait(false);
+            var confirmedGone = !await handle.Boundary.HasLiveProcessesAsync(ct).ConfigureAwait(false);
+
+            return new AttemptResult(
+                attemptId,
+                AttemptResultReason.Exited,
+                exitCode,
+                output.Stdout, output.StdoutTruncated,
+                output.Stderr, output.StderrTruncated,
+                DateTimeOffset.UtcNow - handle.StartedAt,
+                Array.Empty<string>(),
+                confirmedGone);
+        }
+        finally
+        {
+            await handle.Boundary.DisposeAsync().ConfigureAwait(false);
+        }
+    }
+
+    /// <summary>
+    /// Runs the staged termination ladder against a live attempt's boundary, removes it from
+    /// tracking, and returns the standardized result envelope. <see cref="AttemptResult.TerminationStages"/>
+    /// is which rung was reached — journal this; if production is routinely reaching "Killed",
+    /// cooperative cancellation is decorative and you should know that.
+    /// </summary>
+    public async Task<AttemptResult> CancelAsync(
         Guid attemptId,
         Func<CancellationToken, Task>? sendProtocolCancel,
         CancellationToken ct)
@@ -90,13 +125,35 @@ public sealed class ExecutionSupervisor : IAsyncDisposable
         WorkerHandle? handle;
         lock (_gate) _workers.Remove(attemptId, out handle);
         if (handle is null)
-            return new TerminationOutcome(true, TimeSpan.Zero, new[] { "AlreadyGone" });
+            return new AttemptResult(
+                attemptId, AttemptResultReason.Terminated, null, "", false, "", false,
+                TimeSpan.Zero, new[] { "AlreadyGone" }, ProcessesConfirmedGone: true);
 
         try
         {
-            return await _termination
+            var termination = await _termination
                 .TerminateAsync(handle.Boundary, handle.Process.Exited, sendProtocolCancel, ct)
                 .ConfigureAwait(false);
+
+            // Read completed tasks only — a "KillVerificationFailed" rung means the ladder gave
+            // up on confirming death, so Exited/Output may never complete. Awaiting them here
+            // would trade a bounded verify-timeout for an unbounded hang.
+            var exitCode = handle.Process.Exited.IsCompletedSuccessfully
+                ? handle.Process.Exited.Result
+                : (int?)null;
+            var output = handle.Process.Output.IsCompletedSuccessfully
+                ? handle.Process.Output.Result
+                : CapturedOutput.Empty;
+
+            return new AttemptResult(
+                attemptId,
+                AttemptResultReason.Terminated,
+                exitCode,
+                output.Stdout, output.StdoutTruncated,
+                output.Stderr, output.StderrTruncated,
+                termination.Duration,
+                termination.StagesEntered,
+                termination.ProcessesConfirmedGone);
         }
         finally
         {
@@ -138,4 +195,4 @@ public sealed class ExecutionSupervisor : IAsyncDisposable
     }
 }
 
-public sealed record WorkerHandle(Guid AttemptId, IIsolationBoundary Boundary, IsolatedProcessHandle Process);
+public sealed record WorkerHandle(Guid AttemptId, IIsolationBoundary Boundary, IsolatedProcessHandle Process, DateTimeOffset StartedAt);

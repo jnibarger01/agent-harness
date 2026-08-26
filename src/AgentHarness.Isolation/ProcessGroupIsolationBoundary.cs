@@ -48,11 +48,12 @@ public sealed class ProcessGroupIsolationBoundary : IIsolationBoundary
         var process = Process.Start(psi) ?? throw new InvalidOperationException("Failed to start isolated process.");
         _started.Add(process);
 
-        // Drain both pipes immediately. A full stdout buffer blocks the child forever, and the
-        // resulting hang is indistinguishable from a model stall.
-        var stdout = DrainAsync(process.StandardOutput, cancellationToken);
-        var stderr = DrainAsync(process.StandardError, cancellationToken);
-        var exited = WaitAsync(process, stdout, stderr);
+        // Drain both pipes immediately, bounded — a full stdout buffer blocks the child forever,
+        // and the resulting hang is indistinguishable from a model stall.
+        var stdoutCapture = OutputCapture.CaptureAsync(process.StandardOutput, cancellationToken);
+        var stderrCapture = OutputCapture.CaptureAsync(process.StandardError, cancellationToken);
+        var exited = WaitAsync(process, stdoutCapture, stderrCapture);
+        var output = OutputCapture.BuildResultAsync(stdoutCapture, stderrCapture);
 
         // `setsid --wait` FORKS: the new session leader is its child, so the parent's pid is not
         // the workload's pgid. Signalling -parentPid would hit nothing and every liveness probe
@@ -60,7 +61,7 @@ public sealed class ProcessGroupIsolationBoundary : IIsolationBoundary
         // (this was bug #1 found while authoring the reference implementation this is ported from).
         _pgid = await ResolvePgidAsync(process.Id, cancellationToken).ConfigureAwait(false);
 
-        return new IsolatedProcessHandle(process.Id, process.StandardInput, exited);
+        return new IsolatedProcessHandle(process.Id, process.StandardInput, exited, output);
     }
 
     private static async Task<int> ResolvePgidAsync(int parentPid, CancellationToken cancellationToken)
@@ -106,30 +107,15 @@ public sealed class ProcessGroupIsolationBoundary : IIsolationBoundary
         }
     }
 
-    private static async Task DrainAsync(StreamReader reader, CancellationToken cancellationToken)
-    {
-        var buffer = new char[4096];
-        while (!cancellationToken.IsCancellationRequested)
-        {
-            var read = await reader.ReadAsync(buffer, cancellationToken).ConfigureAwait(false);
-            if (read == 0) return;
-        }
-    }
-
-    private static async Task<int> WaitAsync(Process process, Task stdout, Task stderr)
+    private static async Task<int> WaitAsync(
+        Process process, Task<(string Text, bool Truncated)> stdout, Task<(string Text, bool Truncated)> stderr)
     {
         await process.WaitForExitAsync().ConfigureAwait(false);
 
         // Only after the pipes are done: WaitForExit alone can return before the redirected
-        // streams are flushed.
-        await Task.WhenAll(SwallowAsync(stdout), SwallowAsync(stderr)).ConfigureAwait(false);
+        // streams are flushed. OutputCapture never throws OperationCanceledException itself.
+        await Task.WhenAll(stdout, stderr).ConfigureAwait(false);
         return process.ExitCode;
-    }
-
-    private static async Task SwallowAsync(Task task)
-    {
-        try { await task.ConfigureAwait(false); }
-        catch (OperationCanceledException) { /* draining stops with the boundary */ }
     }
 
     // Direct syscall rather than shelling out to /bin/kill: `kill -0 -1234` is ambiguous,

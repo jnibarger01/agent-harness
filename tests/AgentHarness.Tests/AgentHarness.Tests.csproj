@@ -17,5 +17,6 @@
     <ProjectReference Include="..\..\src\AgentHarness.Isolation\AgentHarness.Isolation.csproj" />
     <ProjectReference Include="..\..\src\AgentHarness.PolicyBridge\AgentHarness.PolicyBridge.csproj" />
     <ProjectReference Include="..\..\src\AgentHarness.Tools\AgentHarness.Tools.csproj" />
+    <ProjectReference Include="..\..\src\AgentHarness.Execution\AgentHarness.Execution.csproj" />
   </ItemGroup>
 </Project>
